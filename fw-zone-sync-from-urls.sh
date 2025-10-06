@@ -71,17 +71,25 @@ update_zone_sources() {
         return
     fi
 
-    while read -r ip; do
-        [[ -z "$ip" ]] && continue
-        firewall-cmd --zone="$zone" --add-source="$ip" --permanent
-        json_log "INFO" "Added IP" '{"source":"'"$ip"'"}'
-    done <<< "$added"
+    # Log added IPs as array
+    if [[ -n "$added" ]]; then
+        mapfile -t added_ips <<< "$added"
+        for ip in "${added_ips[@]}"; do
+            [[ -z "$ip" ]] && continue
+            firewall-cmd --zone="$zone" --add-source="$ip" --permanent
+        done
+        json_log "INFO" "Added IPs to zone" '{"added_ips":'"$(jq -nc --argjson a "$(printf '%s\n' "${added_ips[@]}" | jq -R . | jq -s .)" '$a')"'}'
+    fi
 
-    while read -r ip; do
-        [[ -z "$ip" ]] && continue
-        firewall-cmd --zone="$zone" --remove-source="$ip" --permanent
-        json_log "INFO" "Removed IP" '{"source":"'"$ip"'"}'
-    done <<< "$removed"
+    # Log removed IPs as array
+    if [[ -n "$removed" ]]; then
+        mapfile -t removed_ips <<< "$removed"
+        for ip in "${removed_ips[@]}"; do
+            [[ -z "$ip" ]] && continue
+            firewall-cmd --zone="$zone" --remove-source="$ip" --permanent
+        done
+        json_log "INFO" "Removed IPs from zone" '{"removed_ips":'"$(jq -nc --argjson r "$(printf '%s\n' "${removed_ips[@]}" | jq -R . | jq -s .)" '$r')"'}'
+    fi
 
     firewall-cmd --reload
     json_log "INFO" "Reloaded zone after updates"
