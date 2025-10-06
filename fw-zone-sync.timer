@@ -1,8 +1,10 @@
 [Unit]
-Description=Periodic Firewalld zone source sync
+Description=Run Firewalld DNS IP sync periodically
 
 [Timer]
-OnBootSec=5m
+# Wait 2 minutes after boot before first run
+OnBootSec=2m
+# Run every 6 hours
 OnUnitActiveSec=6h
 Persistent=true
 
