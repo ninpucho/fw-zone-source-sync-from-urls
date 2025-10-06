@@ -1,0 +1,11 @@
+[Unit]
+Description=Sync Firewalld zone sources from URLs
+After=network-online.target firewalld.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fw-zone-sync-from-urls.sh public -f /etc/fw-zone-sync/urls.txt
+Nice=10
+StandardOutput=append:/var/log/fw-zone-sync.log
+StandardError=append:/var/log/fw-zone-sync.log
