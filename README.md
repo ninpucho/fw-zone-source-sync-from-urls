@@ -36,7 +36,7 @@ Key features:
 1. Copy the script to `/usr/local/bin`:
 ```
 wget -O /usr/local/bin/fw-zone-sync.sh \
-https://github.com/ninpucho/fw-zone-source-sync-from-urls/blob/main/fw-zone-sync.sh
+https://raw.githubusercontent.com/ninpucho/fw-zone-source-sync-from-urls/refs/heads/main/fw-zone-sync.sh
 ```
 
 2. Create a directory for multi-zone config:
@@ -101,14 +101,14 @@ sudo /usr/local/bin/fw-zone-sync.sh --dry-run -f /etc/fw-zone-sync/zones.ini
 
 ```
 wget -O /etc/systemd/system/fw-zone-sync.service \
-https://github.com/ninpucho/fw-zone-source-sync-from-urls/blob/main/fw-zone-sync.service
+https://raw.githubusercontent.com/ninpucho/fw-zone-source-sync-from-urls/refs/heads/main/fw-zone-sync.service
 ```
 
 ### Timer Install
 
 ```
 wget -O /etc/systemd/system/fw-zone-sync.timer \
-https://github.com/ninpucho/fw-zone-source-sync-from-urls/blob/main/fw-zone-sync.timer
+https://raw.githubusercontent.com/ninpucho/fw-zone-source-sync-from-urls/refs/heads/main/fw-zone-sync.timer
 ```
 
 Enable and start the timer:
@@ -192,7 +192,7 @@ File: `/etc/logrotate.d/fw-zone-sync-json`
 Install
 ```
 wget -O /etc/systemd/system/fw-zone-sync-json \
-https://github.com/ninpucho/fw-zone-source-sync-from-urls/blob/main/fw-zone-sync-json
+https://raw.githubusercontent.com/ninpucho/fw-zone-source-sync-from-urls/refs/heads/main/fw-zone-sync-json
 ```
 
 ```conf
