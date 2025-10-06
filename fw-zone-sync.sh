@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # fw-zone-sync.sh
 # Sync Firewalld zone sources from DNS hostnames (supports multiple zones via config file)
-# Logs structured JSON to /var/log/fw-zone-sync.jsonl
-# Version: 1.4
+# Logs structured JSON (with hostnames) to /var/log/fw-zone-sync.jsonl
+# Version: 2.0
 # Author: ChatGPT
 
 set -euo pipefail
@@ -17,12 +17,16 @@ ZONE=""
 json_log() {
     local level="$1"; shift
     local msg="$1"; shift
-    local extra="${1:-{} }"
+    local extra="${1:-}"  # optional extra JSON
     local ts
     ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-    jq -cn --arg ts "$ts" --arg lvl "$level" --arg msg "$msg" --arg zone "$ZONE" \
-        --argjson extra "$extra" \
-        '{timestamp:$ts,level:$lvl,zone:$zone,message:$msg} + $extra' >> "$LOGFILE"
+
+    # default extra to empty JSON object
+    [[ -z "$extra" ]] && extra="{}"
+
+    # safely append extra JSON
+    echo "$extra" | jq -c --arg ts "$ts" --arg lvl "$level" --arg msg "$msg" --arg zone "$ZONE" \
+        '{timestamp:$ts,level:$lvl,zone:$zone,message:$msg} + .' >> "$LOGFILE"
 }
 
 # -----------------------
@@ -57,12 +61,13 @@ get_zone_sources() {
 }
 
 # -----------------------
-# Update zone sources (with proper JSON logging)
+# Update zone sources (with JSON logging)
 # -----------------------
 update_zone_sources() {
     local zone="$1"
     local desired_file="$2"
     local current_file="$3"
+    local -n host_ip_map_ref=$4  # pass HOST_IP_MAP by reference
 
     ZONE="$zone"
     local added removed
@@ -77,12 +82,19 @@ update_zone_sources() {
         return
     fi
 
-    # Dry-run: log added/removed IPs without applying
+    # Build host->IP JSON array
+    if [ "${#host_ip_map_ref[@]}" -gt 0 ]; then
+        host_ip_json=$(printf '%s\n' "${host_ip_map_ref[@]}" | jq -s .)
+    else
+        host_ip_json="[]"
+    fi
+
+    # Dry-run: log IPs that would be added/removed
     if [ "$DRY_RUN" -eq 1 ]; then
         added_json=$(printf '%s\n' "${added_ips[@]}" | jq -R . | jq -s .)
         removed_json=$(printf '%s\n' "${removed_ips[@]}" | jq -R . | jq -s .)
         json_log "INFO" "Dry-run: IPs that would be added/removed" \
-            "{\"added_ips\":$added_json,\"removed_ips\":$removed_json}"
+            "{\"added_ips\":$added_json,\"removed_ips\":$removed_json,\"host_ips\":$host_ip_json}"
         return
     fi
 
@@ -93,7 +105,7 @@ update_zone_sources() {
             [[ -z "$ip" ]] && continue
             firewall-cmd --zone="$zone" --add-source="$ip" --permanent
         done
-        json_log "INFO" "Added IPs to zone" "{\"added_ips\":$added_json}"
+        json_log "INFO" "Added IPs to zone" "{\"added_ips\":$added_json,\"host_ips\":$host_ip_json}"
     fi
 
     # Apply removed IPs
@@ -103,7 +115,7 @@ update_zone_sources() {
             [[ -z "$ip" ]] && continue
             firewall-cmd --zone="$zone" --remove-source="$ip" --permanent
         done
-        json_log "INFO" "Removed IPs from zone" "{\"removed_ips\":$removed_json}"
+        json_log "INFO" "Removed IPs from zone" "{\"removed_ips\":$removed_json,\"host_ips\":$host_ip_json}"
     fi
 
     firewall-cmd --reload
@@ -119,7 +131,7 @@ process_zone() {
     local urls=("$@")
     local desired_file="$TMPDIR/${zone}_desired.txt"
     local current_file="$TMPDIR/${zone}_current.txt"
-
+    declare -a HOST_IP_MAP=()
     ZONE="$zone"
     : > "$desired_file"
 
@@ -133,22 +145,26 @@ process_zone() {
             json_log "WARN" "No IPs resolved for host" '{"host":"'"$host"'"}'
             continue
         fi
+
         for ip in "${ips[@]}"; do
-            echo "$(normalize_ip_source "$ip")" >> "$desired_file"
+            ip=$(normalize_ip_source "$ip")
+            echo "$ip" >> "$desired_file"
+            HOST_IP_MAP+=("{\"host\":\"$host\",\"ip\":\"$ip\"}")
         done
     done
 
     sort -u -o "$desired_file" "$desired_file"
     get_zone_sources "$zone" > "$current_file"
 
-    update_zone_sources "$zone" "$desired_file" "$current_file"
+    update_zone_sources "$zone" "$desired_file" "$current_file" HOST_IP_MAP
 }
 
 # -----------------------
-# Parse CLI arguments
+# CLI argument parsing
 # -----------------------
 DRY_RUN=0
 CONFIG_FILE=""
+
 if [[ "${1:-}" == "--dry-run" ]]; then
     DRY_RUN=1
     shift
@@ -186,10 +202,12 @@ if [ -n "$CONFIG_FILE" ]; then
     CURRENT_ZONE=""
     declare -a URLS=()
     while IFS= read -r line || [[ -n "$line" ]]; do
+        # Remove comments and trim
         line="${line%%#*}"
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" ]] && continue
+
         if [[ "$line" =~ ^\[(.*)\]$ ]]; then
             if [ -n "$CURRENT_ZONE" ]; then
                 process_zone "$CURRENT_ZONE" "${URLS[@]}"
