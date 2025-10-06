@@ -1,168 +1,203 @@
 #!/usr/bin/env bash
-# fw-zone-sync-from-urls.sh
-# Sync Firewalld zone sources with IPs resolved from given URLs.
+# fw-zone-sync.sh
+# Sync Firewalld zone sources from DNS hostnames (supports multiple zones via config file)
 # Logs structured JSON to /var/log/fw-zone-sync.jsonl
-# Version: 1.2
-# Author: ChatGPT (GPT-5)
+# Version: 1.3
+# Author: ChatGPT
 
 set -euo pipefail
 
 LOGFILE="/var/log/fw-zone-sync.jsonl"
-TIMESTAMP="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+TMPDIR=$(mktemp -d)
+
+# -----------------------
+# Logging function
+# -----------------------
 ZONE=""
-DRY_RUN=0
-
-# ensure log file exists and writable
-touch "$LOGFILE" 2>/dev/null || {
-  echo "ERROR: cannot write to $LOGFILE (need root?)" >&2
-  exit 1
-}
-
 json_log() {
-  # args: level, msg, [extra_fields_json]
-  local level="$1"
-  local msg="$2"
-  local extra="${3:-{}}"
-  local ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  jq -cn --arg ts "$ts" --arg lvl "$level" --arg msg "$msg" --arg zone "$ZONE" \
-     --argjson extra "$extra" \
-     '{timestamp:$ts,level:$lvl,zone:$zone,message:$msg} + $extra' >> "$LOGFILE"
+    local level="$1"; shift
+    local msg="$1"; shift
+    local extra="${1:-{}}"
+    local ts
+    ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    jq -cn --arg ts "$ts" --arg lvl "$level" --arg msg "$msg" --arg zone "$ZONE" \
+        --argjson extra "$extra" \
+        '{timestamp:$ts,level:$lvl,zone:$zone,message:$msg} + $extra' >> "$LOGFILE"
 }
 
+# -----------------------
+# Helpers
+# -----------------------
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
-print_usage() {
-  cat <<EOF
-Usage:
-  $0 [--dry-run] <zone> URL [URL ...]
-  $0 [--dry-run] <zone> -f <file_with_urls>
-EOF
+normalize_ip_source() {
+    local ip="$1"
+    [[ "$ip" == *:* ]] && echo "${ip}/128" || echo "${ip}/32"
 }
 
 resolve_ips() {
-  local host="$1"
-  local -a ips=()
+    local host="$1"
+    local -a ips=()
 
-  if command_exists dig; then
-    mapfile -t a4 < <(dig +short A "$host" | sed '/^$/d')
-    mapfile -t a6 < <(dig +short AAAA "$host" | sed '/^$/d')
-    ips=("${a4[@]}" "${a6[@]}")
-  elif command_exists getent; then
-    mapfile -t ips < <(getent ahosts "$host" | awk '{print $1}' | sort -u)
-  else
-    json_log "ERROR" "Missing dig/getent tools" '{}'
-    return 1
-  fi
-  printf '%s\n' "${ips[@]}" | sort -u
+    if command_exists dig; then
+        mapfile -t a4 < <(dig +short A "$host" | sed '/^$/d')
+        mapfile -t a6 < <(dig +short AAAA "$host" | sed '/^$/d')
+        ips=("${a4[@]}" "${a6[@]}")
+    elif command_exists getent; then
+        mapfile -t ips < <(getent ahosts "$host" | awk '{print $1}' | sort -u)
+    else
+        json_log "ERROR" "Missing dig/getent tools"
+        return 1
+    fi
+    printf '%s\n' "${ips[@]}" | sort -u
 }
 
-normalize_ip_source() {
-  local ip="$1"
-  [[ "$ip" == *:* ]] && echo "${ip}/128" || echo "${ip}/32"
+get_zone_sources() {
+    firewall-cmd --zone="$1" --list-sources | tr ' ' '\n' | sort -u
 }
 
-# --- parse args ---
-if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
-  print_usage; exit 0
-fi
+update_zone_sources() {
+    local zone="$1"
+    local desired_file="$2"
+    local current_file="$3"
+
+    ZONE="$zone"
+    local added removed
+    added=$(comm -23 "$desired_file" "$current_file" || true)
+    removed=$(comm -13 "$desired_file" "$current_file" || true)
+
+    if [[ -z "$added" && -z "$removed" ]]; then
+        json_log "INFO" "No IP changes detected for zone '$zone'"
+        return
+    fi
+
+    while read -r ip; do
+        [[ -z "$ip" ]] && continue
+        firewall-cmd --zone="$zone" --add-source="$ip" --permanent
+        json_log "INFO" "Added IP" '{"source":"'"$ip"'"}'
+    done <<< "$added"
+
+    while read -r ip; do
+        [[ -z "$ip" ]] && continue
+        firewall-cmd --zone="$zone" --remove-source="$ip" --permanent
+        json_log "INFO" "Removed IP" '{"source":"'"$ip"'"}'
+    done <<< "$removed"
+
+    firewall-cmd --reload
+    json_log "INFO" "Reloaded zone after updates"
+}
+
+# -----------------------
+# Parse arguments
+# -----------------------
+DRY_RUN=0
+CONFIG_FILE=""
 if [[ "${1:-}" == "--dry-run" ]]; then
-  DRY_RUN=1; shift
+    DRY_RUN=1
+    shift
 fi
-if [ $# -lt 2 ]; then print_usage; exit 2; fi
 
-ZONE="$1"; shift
-URLS=()
+print_usage() {
+    cat <<EOF
+Usage:
+  $0 [--dry-run] ZONE URL [URL ...]
+  $0 [--dry-run] -f CONFIG_FILE
+
+CONFIG_FILE format (INI-like):
+[zone1]
+url1
+url2
+
+[zone2]
+url3
+url4
+EOF
+}
+
+if [ $# -lt 1 ]; then print_usage; exit 2; fi
+
 if [[ "$1" == "-f" ]]; then
-  [ $# -ge 2 ] || { json_log "ERROR" "-f requires a filename" '{}'; exit 2; }
-  file="$2"
-  [ -f "$file" ] || { json_log "ERROR" "file not found: $file" '{"file":"'"$file"'"}'; exit 2; }
-  while IFS= read -r line; do
-    line="${line%%#*}"
-    line="${line#"${line%%[![:space:]]*}"}"
-    line="${line%"${line##*[![:space:]]}"}"
-    [ -n "$line" ] && URLS+=("$line")
-  done < "$file"
+    [ $# -ge 2 ] || { echo "Missing config file"; exit 2; }
+    CONFIG_FILE="$2"
+    [ -f "$CONFIG_FILE" ] || { echo "Config file not found: $CONFIG_FILE"; exit 2; }
 else
-  URLS=("$@")
+    # Single zone mode
+    ZONE="$1"
+    shift
+    URLS=("$@")
 fi
 
-json_log "INFO" "Starting sync for zone" '{"urls_count":'"${#URLS[@]}"'}'
+# -----------------------
+# Function to process a single zone
+# -----------------------
+process_zone() {
+    local zone="$1"
+    shift
+    local urls=("$@")
+    local desired_file="$TMPDIR/${zone}_desired.txt"
+    local current_file="$TMPDIR/${zone}_current.txt"
 
-if ! firewall-cmd --get-zones | tr ' ' '\n' | grep -qx "$ZONE"; then
-  json_log "ERROR" "Zone not found" '{"zone":"'"$ZONE"'"}'
-  exit 3
-fi
+    ZONE="$zone"
+    : > "$desired_file"
 
-declare -A desired_map=()
-for rawurl in "${URLS[@]}"; do
-  host="$rawurl"
-  host="${host#*://}"; host="${host%%/*}"; host="${host%%:*}"; host="${host##*@}"
-  [ -z "$host" ] && { json_log "WARN" "Unable to parse host" '{"raw":"'"$rawurl"'"}'; continue; }
+    for rawurl in "${urls[@]}"; do
+        host="$rawurl"
+        host="${host#*://}"; host="${host%%/*}"; host="${host%%:*}"; host="${host##*@}"
+        [ -z "$host" ] && { json_log "WARN" "Could not parse host" '{"raw":"'"$rawurl"'"}'; continue; }
 
-  mapfile -t ips < <(resolve_ips "$host" || true)
-  if [ "${#ips[@]}" -eq 0 ]; then
-    json_log "WARN" "No IPs resolved for host" '{"host":"'"$host"'"}'
-    continue
-  fi
+        mapfile -t ips < <(resolve_ips "$host" || true)
+        if [ "${#ips[@]}" -eq 0 ]; then
+            json_log "WARN" "No IPs resolved for host" '{"host":"'"$host"'"}'
+            continue
+        fi
+        for ip in "${ips[@]}"; do
+            echo "$(normalize_ip_source "$ip")" >> "$desired_file"
+        done
+    done
 
-  for ip in "${ips[@]}"; do
-    src=$(normalize_ip_source "$ip")
-    desired_map["$src"]=1
-    json_log "DEBUG" "Resolved host" '{"host":"'"$host"'", "ip":"'"$src"'"}'
-  done
-done
+    sort -u -o "$desired_file" "$desired_file"
+    get_zone_sources "$zone" > "$current_file"
 
-desired_file=$(mktemp); current_file=$(mktemp)
-to_add_file=$(mktemp); to_remove_file=$(mktemp)
-trap 'rm -f "$desired_file" "$current_file" "$to_add_file" "$to_remove_file"' EXIT
+    if [ "$DRY_RUN" -eq 1 ]; then
+        json_log "INFO" "Dry-run mode: would update zone" '{"zone":"'"$zone"'"}'
+        return
+    fi
 
-for k in "${!desired_map[@]}"; do echo "$k"; done | sort > "$desired_file"
+    update_zone_sources "$zone" "$desired_file" "$current_file"
+}
 
-current_sources_raw=$(firewall-cmd --zone="$ZONE" --list-sources 2>/dev/null || true)
-if [ -z "$current_sources_raw" ]; then > "$current_file"
+# -----------------------
+# Main execution
+# -----------------------
+if [ -n "$CONFIG_FILE" ]; then
+    # Multi-zone mode: parse INI-like config
+    CURRENT_ZONE=""
+    declare -a URLS=()
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%#*}"                     # Remove comments
+        line="${line#"${line%%[![:space:]]*}"}" # Trim leading
+        line="${line%"${line##*[![:space:]]}"}" # Trim trailing
+        [[ -z "$line" ]] && continue
+        if [[ "$line" =~ ^\[(.*)\]$ ]]; then
+            # process previous zone
+            if [ -n "$CURRENT_ZONE" ]; then
+                process_zone "$CURRENT_ZONE" "${URLS[@]}"
+            fi
+            CURRENT_ZONE="${BASH_REMATCH[1]}"
+            URLS=()
+        else
+            URLS+=("$line")
+        fi
+    done < "$CONFIG_FILE"
+    # last zone
+    if [ -n "$CURRENT_ZONE" ]; then
+        process_zone "$CURRENT_ZONE" "${URLS[@]}"
+    fi
 else
-  for s in $current_sources_raw; do
-    [[ "$s" == *"/"* ]] && echo "$s" || echo "$(normalize_ip_source "$s")"
-  done | sort > "$current_file"
+    # Single zone mode
+    process_zone "$ZONE" "${URLS[@]}"
 fi
 
-comm -23 "$desired_file" "$current_file" > "$to_add_file"
-comm -13 "$desired_file" "$current_file" > "$to_remove_file"
-
-add_count=$(wc -l < "$to_add_file" | tr -d ' ')
-remove_count=$(wc -l < "$to_remove_file" | tr -d ' ')
-
-if [ "$add_count" -eq 0 ] && [ "$remove_count" -eq 0 ]; then
-  json_log "INFO" "No changes detected" '{}'
-  exit 0
-fi
-
-json_log "INFO" "Detected changes" '{"add_count":'"$add_count"',"remove_count":'"$remove_count"'}'
-
-if [ "$DRY_RUN" -eq 1 ]; then
-  json_log "INFO" "Dry-run mode: no changes applied" '{}'
-  exit 0
-fi
-
-PERM_CHANGED=0
-while IFS= read -r src; do
-  [ -z "$src" ] && continue
-  json_log "INFO" "Adding source" '{"source":"'"$src"'"}'
-  firewall-cmd --zone="$ZONE" --add-source="$src" >/dev/null 2>&1 || json_log "WARN" "Runtime add failed" '{"source":"'"$src"'"}'
-  firewall-cmd --permanent --zone="$ZONE" --add-source="$src" >/dev/null 2>&1 && PERM_CHANGED=1 || json_log "WARN" "Permanent add failed" '{"source":"'"$src"'"}'
-done < "$to_add_file"
-
-while IFS= read -r src; do
-  [ -z "$src" ] && continue
-  json_log "INFO" "Removing source" '{"source":"'"$src"'"}'
-  firewall-cmd --zone="$ZONE" --remove-source="$src" >/dev/null 2>&1 || json_log "WARN" "Runtime remove failed" '{"source":"'"$src"'"}'
-  firewall-cmd --permanent --zone="$ZONE" --remove-source="$src" >/dev/null 2>&1 && PERM_CHANGED=1 || json_log "WARN" "Permanent remove failed" '{"source":"'"$src"'"}'
-done < "$to_remove_file"
-
-if [ "$PERM_CHANGED" -eq 1 ]; then
-  firewall-cmd --reload >/dev/null 2>&1
-  json_log "INFO" "Firewalld reloaded" '{}'
-fi
-
-json_log "INFO" "Sync completed" '{"zone":"'"$ZONE"'"}'
+rm -rf "$TMPDIR"
+json_log "INFO" "All zones processed"
 exit 0
