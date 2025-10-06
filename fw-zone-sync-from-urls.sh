@@ -71,29 +71,39 @@ update_zone_sources() {
         return
     fi
 
-    # Log added IPs as array
-    if [[ -n "$added" ]]; then
-        mapfile -t added_ips <<< "$added"
-        for ip in "${added_ips[@]}"; do
-            [[ -z "$ip" ]] && continue
-            firewall-cmd --zone="$zone" --add-source="$ip" --permanent
-        done
-        json_log "INFO" "Added IPs to zone" '{"added_ips":'"$(jq -nc --argjson a "$(printf '%s\n' "${added_ips[@]}" | jq -R . | jq -s .)" '$a')"'}'
+    mapfile -t added_ips <<< "$added"
+    mapfile -t removed_ips <<< "$removed"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        json_log "INFO" "Dry-run: IPs that would be added/removed" \
+            '{"added_ips":'"$(jq -nc --argjson a "$(printf '%s\n' "${added_ips[@]}" | jq -R . | jq -s .)" '$a')"',"removed_ips":'"$(jq -nc --argjson r "$(printf '%s\n' "${removed_ips[@]}" | jq -R . | jq -s .)" '$r')"'}'
+        return
     fi
 
-    # Log removed IPs as array
-    if [[ -n "$removed" ]]; then
-        mapfile -t removed_ips <<< "$removed"
-        for ip in "${removed_ips[@]}"; do
-            [[ -z "$ip" ]] && continue
-            firewall-cmd --zone="$zone" --remove-source="$ip" --permanent
-        done
-        json_log "INFO" "Removed IPs from zone" '{"removed_ips":'"$(jq -nc --argjson r "$(printf '%s\n' "${removed_ips[@]}" | jq -R . | jq -s .)" '$r')"'}'
+    # Apply added IPs
+    for ip in "${added_ips[@]}"; do
+        [[ -z "$ip" ]] && continue
+        firewall-cmd --zone="$zone" --add-source="$ip" --permanent
+    done
+    if [[ "${#added_ips[@]}" -gt 0 ]]; then
+        json_log "INFO" "Added IPs to zone" \
+            '{"added_ips":'"$(jq -nc --argjson a "$(printf '%s\n' "${added_ips[@]}" | jq -R . | jq -s .)" '$a')"'}'
+    fi
+
+    # Apply removed IPs
+    for ip in "${removed_ips[@]}"; do
+        [[ -z "$ip" ]] && continue
+        firewall-cmd --zone="$zone" --remove-source="$ip" --permanent
+    done
+    if [[ "${#removed_ips[@]}" -gt 0 ]]; then
+        json_log "INFO" "Removed IPs from zone" \
+            '{"removed_ips":'"$(jq -nc --argjson r "$(printf '%s\n' "${removed_ips[@]}" | jq -R . | jq -s .)" '$r')"'}'
     fi
 
     firewall-cmd --reload
     json_log "INFO" "Reloaded zone after updates"
 }
+
 
 # -----------------------
 # Parse arguments
