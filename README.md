@@ -55,16 +55,20 @@ sudo nano /etc/fw-zone-sync/zones.ini
 
 ## Configuration
 
-The config file supports **multiple zones**, each with a list of hostnames:
+The config file supports **multiple zones**, each with a list of hostnames/ips:
 
 ```ini
 [public]
 host1.example.com
 host2.example.com
+192.168.1.1/24
+192.168.2.5
 
 [dmz]
 service1.example.com
 service2.example.com
+192.168.14.1/24
+192.168.22.6
 ```
 
 * Section names are the **Firewalld zones**.
@@ -219,10 +223,14 @@ https://raw.githubusercontent.com/ninpucho/fw-zone-source-sync-from-urls/refs/he
 [public]
 host1.example.com
 host2.example.com
+192.168.1.1/24
+192.168.2.5
 
 [dmz]
 service1.example.com
 service2.example.com
+192.168.14.1/24
+192.168.22.6
 ```
 
 ---
@@ -231,12 +239,3 @@ service2.example.com
 
 MIT License — free to use and modify.
 
----
-
-This README fully documents your **multi-zone, JSON-logging, dry-run Firewalld sync script** with **systemd + logrotate integration**.
-
----
-
-I can also create a **diagram showing how DNS, Firewalld, systemd, and logging interact**, which is helpful for documentation or handoff.
-
-Do you want me to make that diagram?
