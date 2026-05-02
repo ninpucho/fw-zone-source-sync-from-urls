@@ -35,8 +35,9 @@ json_log() {
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 normalize_ip_source() {
+    # will add CIDR for single IP and also respect if CIDR is present.
     local ip="$1"
-    [[ "$ip" == *:* ]] && echo "${ip}/128" || echo "${ip}/32"
+    [[ "$ip" =~ /\/[0-9]+$ ]] && echo "${ip}" || [[ "$ip" == *:* ]] && echo "${ip}/128" || echo "${ip}/32"
 }
 
 resolve_ips() {
@@ -136,18 +137,32 @@ process_zone() {
     : > "$desired_file"
 
     for rawurl in "${urls[@]}"; do
+        local host
         host="$rawurl"
-        host="${host#*://}"; host="${host%%/*}"; host="${host%%:*}"; host="${host##*@}"
-        [ -z "$host" ] && { json_log "WARN" "Could not parse host" '{"raw":"'"$rawurl"'"}'; continue; }
 
-        mapfile -t ips < <(resolve_ips "$host" || true)
-        if [ "${#ips[@]}" -eq 0 ]; then
-            json_log "WARN" "No IPs resolved for host" '{"host":"'"$host"'"}'
-            continue
+        # Check if it's an IP address or IP/CIDR using ipcalc
+        if ipcalc -n "$host" > /dev/null 2>&1; then
+            # It’s a valid IP address or CIDR, use it directly.
+            ip="$host"
+        else
+            host="${host#*://}"; host="${host%%/*}"; host="${host%%:*}"; host="${host##*@}";
+            [ -z "$host" ] && { json_log "WARN" "Could not parse host" '{"raw":"'"$rawurl"'"}'; continue; }
+
+            mapfile -t ips < <(resolve_ips "$host" || true)
+
+            if [ "${#ips[@]}" -eq 0 ]; then
+                json_log "WARN" "No IPs resolved for host" '{"host":"'"$host"'"}'
+                continue
+            fi
         fi
-
         for ip in "${ips[@]}"; do
             ip=$(normalize_ip_source "$ip")
+
+            if ! ipcalc -n "$ip" > /dev/null 2>&1; then
+                json_log "ERROR" "Invalid IP address after normalization: $ip"
+                continue
+            fi
+
             echo "$ip" >> "$desired_file"
             HOST_IP_MAP+=("{\"host\":\"$host\",\"ip\":\"$ip\"}")
         done
@@ -155,7 +170,6 @@ process_zone() {
 
     sort -u -o "$desired_file" "$desired_file"
     get_zone_sources "$zone" > "$current_file"
-
     update_zone_sources "$zone" "$desired_file" "$current_file" HOST_IP_MAP
 }
 
